@@ -258,7 +258,7 @@ app.delete("/cart/:id", async (req, res) => {
 app.post("/create-payment-intent", async (req, res) => {
   try {
     const { price } = req.body;
-    const amount = parseInt(price * 100 );
+    const amount = parseInt(price * 100);
     const paymentIntent = await stripe.paymentIntents.create({
       amount: amount,
       currency: "usd",
@@ -272,30 +272,106 @@ app.post("/create-payment-intent", async (req, res) => {
   }
 });
 
-app.get("/payment/:email", verifyToken, async(req, res)=>{
-  const email = req.params?.email;
-  const verifyEamil = req.decoded;
-  if(email !== verifyEamil){
-    return res.status(403).send({message: "forbidden access"})
+app.get("/payment/:email", verifyToken, async (req, res) => {
+  try {
+    const email = req.params?.email;
+    const verifyEamil = req.decoded;
+    if (email !== verifyEamil) {
+      return res.status(403).send({ message: "forbidden access" });
+    }
+    const query = { email: email };
+    const result = await paymentCollection.find(query).toArray();
+    res.send(result);
+  } catch (err) {
+    console.log(err);
   }
-  const query = {email: email}
-  const result = await paymentCollection.find(query).toArray();
-  res.send(result)
+});
 
-
-})
-
-app.post("/payment", async(req, res)=>{
-  const payment = req.body;
-  const result = await paymentCollection.insertOne(payment);
-  // carefully delete each item on the cart 
-  const query = {_id:{
-    $in: payment.cartIds.map(id => new ObjectId(id))
+app.post("/payment", async (req, res) => {
+  try {
+    const payment = req.body;
+    console.log({payment});
+    payment.menuItemIds= payment.menuItemIds.map((id) => new ObjectId(id))
+    const result = await paymentCollection.insertOne(payment);
+    // carefully delete each item on the cart
+    const query = {
+      _id: {
+        $in: payment.cartIds.map((id) => new ObjectId(id)),
+      },
+    };
+    const deletedResult = await cartCollection.deleteMany(query);
+    res.send({ result, deletedResult });
+  } catch (err) {
+    console.log(err);
   }
-  }
-  const deletedResult =await cartCollection.deleteMany(query)
-  res.send({result, deletedResult})
-})
+});
+
+// admin stats
+
+app.get("/admin-stats", verifyToken, verifyAdmin, async (req, res) => {
+  const users = await userCollection.estimatedDocumentCount();
+  const products = await menuCollection.estimatedDocumentCount();
+  const orders = await paymentCollection.estimatedDocumentCount();
+  // not the best way. There has better way to aggregate the price
+  // const payments = await paymentCollection.find().toArray();
+  // const revenue = payments.reduce((total, payment) => total + payment.price ,0)
+  const result = await paymentCollection
+    .aggregate([
+      {
+        $group: {
+          _id: null,
+          totalPrice: {
+            $sum: "$price",
+          },
+        },
+      },
+    ])
+    .toArray();
+  const revenue = result.length > 0 ? result[0].totalPrice : 0;
+
+  res.send({ users, products, orders, revenue });
+});
+
+// order stats
+app.get("/order-stats", verifyToken, verifyAdmin, async (req, res) => {
+  const result = await paymentCollection
+    .aggregate([
+      {
+        $unwind: "$menuItemIds",
+      },
+      {
+        $lookup: {
+          from: 'menus',  
+          localField: 'menuItemIds',
+          foreignField: '_id',
+          as: "menuItem",
+        },
+      },
+      {
+        $unwind: "$menuItem"
+      },
+      {
+        $group:{
+          _id:"$menuItem.category",
+          quantity: {
+            $sum:1
+          },
+          revenue:{$sum:"$menuItem.price"},
+
+        }
+      }, 
+      {
+        $project:{
+          _id:0,
+          category: "$_id",
+          quantity: "$quantity",
+          revenue: "$revenue"
+        }
+      }
+    ])
+    .toArray();
+  res.send(result);
+});
 
 async function run() {
   try {
